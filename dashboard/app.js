@@ -226,7 +226,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', null, 'Every pre-token protocol, ranked by ', el('em', { text: 'what its launch would be worth' }), '.'),
-        el('p', { text: 'The watchlist is the floor: ' + DATA.watchlist_size + ' protocols with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. This board ranks all ' + DATA.board_size + ' protocols that record no token, priced from the ' + DATA.calibration.comps_total + ' that already trade. Implied value is a model, not a promise — and never proof a token is coming.' })
+        el('p', { text: 'The watchlist is the floor: ' + DATA.watchlist_size + ' protocols with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. This board ranks ' + DATA.board_size + ' of the ' + DATA.counts.pre_token + ' protocols that record no token — the ones that pass the watchlist\u2019s own eligibility rule. The other ' + DATA.counts.excluded + ' are wrapped, staked, bridged or exchange products of tokens that already trade, so they are set aside under Trading reference instead of ranked as launches. Implied value is a model, not a promise — and never proof a token is coming.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -270,7 +270,7 @@
       el('div', { class: 'field' }, el('label', { for: 'band', text: 'TVL band' }), band),
       el('label', { class: 'check', for: 'watch' }, watch, 'Watchlist only'),
       el('div', { class: 'field' }, el('span', { class: 'lab', text: 'View' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre' ? filteredRows().length + ' of ' + DATA.board_size + ' rows shown' : DATA.live.length + ' trading protocols' })
+      el('span', { class: 'count', text: state.tab === 'pre' ? filteredRows().length + ' of ' + DATA.board_size + ' rows shown' : DATA.live.length + ' trading protocols, ' + DATA.excluded.length + ' set aside' })
     );
   }
 
@@ -322,7 +322,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its value breakdown and farm plan. "No token" means the record carries none, never that none exists.' }),
+          el('caption', { class: 'sub', text: 'Eligible pre-token protocols, strongest implied value first. Select a row for its value breakdown and farm plan. "No token" means the record carries none, never that none exists.' }),
           el('thead', null, el('tr', null,
             sortHeader('rank', 'Rank'),
             sortHeader('name', 'Protocol'),
@@ -362,6 +362,28 @@
     );
   }
 
+  function excludedTable() {
+    var tbody = el('tbody');
+    DATA.excluded.forEach(function (r) {
+      tbody.appendChild(el('tr', null,
+        el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Uncategorised') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
+        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
+        el('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) }),
+        el('td', { class: 'wrap', text: r.reason })
+      ));
+    });
+    return el('div', { class: 'panel' },
+      el('h2', { text: 'Set aside by the watchlist rule — not ranked' }),
+      el('p', { class: 'sub', text: 'These ' + DATA.excluded.length + ' protocols record no token in the snapshot, but the watchlist\u2019s own rule sets them aside: a bridge, a liquid-staking or restaking product, a centralised exchange, a version-marked name, or a name that begins with an exchange. Each is a wrapped, staked or bridged product of a token that already trades, so ranking it as a launch that has not happened yet would be wrong. The rule is applied mechanically from the snapshot fields — no name is hand-picked.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Why it is not ranked' }))),
+          tbody
+        )
+      )
+    );
+  }
+
   function modelPanel() {
     var m = DATA.model;
     var c = DATA.calibration;
@@ -380,7 +402,7 @@
       el('div', { class: 'model-grid' }, cells.map(function (cell) {
         return el('div', { class: 'model-cell' }, el('span', { text: cell[0] }), el('b', { text: cell[1] }));
       })),
-      el('p', { class: 'sub', text: 'Age is the time since DefiLlama first listed the protocol; a protocol with no listed date uses the pre-token median age. No protocol name is special-cased, and no row is hand-picked.' })
+      el('p', { class: 'sub', text: 'Age is the time since DefiLlama first listed the protocol; a protocol with no listed date uses the median age of the ranked set. No protocol name is special-cased, and no row is hand-picked. Before scoring, the board applies the watchlist\u2019s own eligibility rule, mechanically from the snapshot fields: bridges, liquid-staking and restaking products, centralised exchanges, version-marked names and exchange-named products are set aside, not ranked.' })
     );
   }
 
@@ -472,9 +494,10 @@
       shell.appendChild(modelPanel());
       shell.appendChild(calibPanel());
     } else {
+      shell.appendChild(excludedTable());
       shell.appendChild(el('section', { class: 'panel' },
         el('h2', { text: 'Why these are set aside' }),
-        el('p', { class: 'sub', text: 'A protocol whose token already trades has a market price, so there is nothing to imply. These ' + DATA.live.length + ' are the largest of them by market cap; their ratios priced the board above. The full calibration table sits under the pre-token board.' })
+        el('p', { class: 'sub', text: 'A protocol whose token already trades has a market price, so there is nothing to imply. These ' + DATA.live.length + ' are the largest of them by market cap; their ratios priced the board above. The ' + DATA.excluded.length + ' above them record no token but are wrapped, staked, bridged or exchange products, so they are not launches either. The full calibration table sits under the pre-token board.' })
       ));
     }
     shell.appendChild(el('p', { class: 'foot', text: 'Source: ' + DATA.source + '. "No token" means the DefiLlama record carries no token — it is not proof that none exists. Implied values are this radar\u2019s own model, never a price or a promise.' }));

@@ -1,8 +1,15 @@
 // Radar model: snapshot in, ranked board out.
 //
 // The board ranks every protocol that records no token (all three of mcap_usd, gecko_id and
-// symbol null). The watchlist is the floor: its 40 slugs are always in, and the other 302
-// pre-token protocols join them, so the board is the full pre-token set, not a TVL top list.
+// symbol null) AND passes the watchlist's own eligibility rule, minus the TVL floor: no
+// Bridge / Canonical Bridge / Liquid Staking / Liquid Restaking / Restaked BTC / CEX
+// category, no version-marked name, no whole word wrapped/staked/staking in the name, and
+// no name that begins with an exchange's name. The rule is the competition's own
+// (input/README.md), applied mechanically from the snapshot fields, so a wrapped, staked
+// or bridged product of a token that already trades is never ranked as a launch that has
+// not happened yet. The watchlist is the floor: its 40 slugs pass the rule by
+// construction and are always in. The protocols the rule sets aside are listed on the
+// dashboard as reference, each with the reason it was set aside.
 //
 // Implied value comes only from the snapshot's own figures. The comparables are the protocols
 // that already trade and carry a market cap: their market-cap-to-TVL ratio, taken per category
@@ -149,6 +156,17 @@ export interface DataRow {
   farm_steps: string[];
 }
 
+/** A pre-token protocol the watchlist rule sets aside, with the reason it is not ranked. */
+export interface ExcludedRef {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  change_7d: number | null;
+  reason: string;
+}
+
 /** Everything the dashboard renders, written to data.js by main.ts. */
 export interface RadarData {
   as_of: string;
@@ -156,12 +174,13 @@ export interface RadarData {
   floor_usd: number;
   model: RadarConstants;
   model_version: string;
-  counts: { protocols: number; pre_token: number; trading: number; with_mcap: number };
+  counts: { protocols: number; pre_token: number; trading: number; with_mcap: number; excluded: number };
   watchlist_size: number;
   board_size: number;
   calibration: Calibration;
   rows: DataRow[];
   live: LiveRef[];
+  excluded: ExcludedRef[];
 }
 
 /** Why the snapshot cannot be scored. */
@@ -201,6 +220,43 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 /** A protocol records no token when all three token fields are null. */
 export function isPreToken(p: SnapProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
+}
+
+/**
+ * The watchlist rule's own exclusion, minus the TVL floor (input/README.md), applied
+ * mechanically from the snapshot fields: no hand-picked names, no hardcoded list.
+ */
+const EXCLUDED_CATEGORIES = new Set([
+  'Bridge',
+  'Canonical Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Restaked BTC',
+  'CEX',
+]);
+const EXCHANGE_NAMES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
+const VERSION_MARK = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
+
+/**
+ * Why a protocol is not ranked, one phrase per rule that fires, or an empty array when it
+ * passes: its category, a version marker at the end of its name, a whole wrapped / staked /
+ * staking word in its name, or a name that begins with an exchange's name.
+ */
+export function exclusionReasons(p: SnapProtocol): string[] {
+  const reasons: string[] = [];
+  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) {
+    reasons.push(
+      p.category === 'CEX'
+        ? 'CEX — a centralised exchange, not a protocol awaiting its own token'
+        : `${p.category} — a wrapped, staked or bridged product of a token that already trades`,
+    );
+  }
+  if (VERSION_MARK.test(p.name)) reasons.push('version-marked name — a new version of a product, not a first launch');
+  if (WRAPPED_WORD.test(p.name)) reasons.push('name carries "wrapped", "staked" or "staking" — a wrapped or staked product of a token that already trades');
+  const exchange = EXCHANGE_NAMES.find((e) => p.name.startsWith(e));
+  if (exchange !== undefined) reasons.push(`name begins with "${exchange}" — an exchange product`);
+  return reasons;
 }
 
 /**
@@ -379,10 +435,10 @@ export function farmSteps(p: SnapProtocol, age: number | null): string[] {
   ];
 }
 
-/** The ranked board: every pre-token protocol, strongest implied value first, ranks 1..N. */
+/** The ranked board: every eligible pre-token protocol, strongest implied value first, ranks 1..N. */
 export function buildBoard(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS): { board: BoardRow[]; calib: Calibration } {
   const calib = calibrate(snapshot.protocols, c);
-  const pre = snapshot.protocols.filter(isPreToken);
+  const pre = snapshot.protocols.filter((p) => isPreToken(p) && exclusionReasons(p).length === 0);
   const fallbackAge = fallbackAgeOf(pre, snapshot.as_of);
   const watch = new Set(snapshot.watchlist);
   const scored = pre.map((p) => {
@@ -424,10 +480,29 @@ export function liveRefs(snapshot: SnapshotDoc, limit = 24): LiveRef[] {
     }));
 }
 
+/** The pre-token protocols the watchlist rule sets aside, by TVL, each with its reason. */
+export function excludedRefs(snapshot: SnapshotDoc): ExcludedRef[] {
+  return snapshot.protocols
+    .filter(isPreToken)
+    .map((p) => ({ p, reasons: exclusionReasons(p) }))
+    .filter((x) => x.reasons.length > 0)
+    .sort((a, b) => b.p.tvl_usd - a.p.tvl_usd)
+    .map((x) => ({
+      slug: x.p.slug,
+      name: x.p.name,
+      category: x.p.category,
+      chains: x.p.chains,
+      tvl_usd: x.p.tvl_usd,
+      change_7d: x.p.change_7d,
+      reason: x.reasons.join('; '),
+    }));
+}
+
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS): { board: BoardRow[]; radar: RadarData } {
   const { board, calib } = buildBoard(snapshot, c);
   const live = liveRefs(snapshot);
+  const excluded = excludedRefs(snapshot);
   const preCount = snapshot.protocols.filter(isPreToken).length;
   const tradingCount = snapshot.protocols.length - preCount;
   const radar: RadarData = {
@@ -441,6 +516,7 @@ export function buildRadar(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS)
       pre_token: preCount,
       trading: tradingCount,
       with_mcap: calib.comps_total,
+      excluded: excluded.length,
     },
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
@@ -460,6 +536,7 @@ export function buildRadar(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS)
       farm_steps: r.farm_steps,
     })),
     live,
+    excluded,
   };
   return { board, radar };
 }

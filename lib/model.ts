@@ -12,18 +12,29 @@
 // dashboard as reference, each with the reason it was set aside.
 //
 // Implied value comes only from the snapshot's own figures. The comparables are the protocols
-// that already trade and carry a market cap: their market-cap-to-TVL ratio, taken per category
-// as a median and shrunk toward the global median when a category has few comps, is the price
-// the market already pays for one dollar of TVL in that line of business. A pre-token
-// protocol's implied value is its TVL at that category ratio, moved by three things the
-// snapshot also records: seven-day TVL growth, how long it has run with no token, and how
-// many chains it runs on. No protocol name is ever special-cased: one function scores all.
+// that already trade and carry a positive market cap: their market-cap-to-TVL ratio, taken per
+// category as a median and shrunk toward the global median when a category has few comps, is the
+// price the market already pays for one dollar of TVL in that line of business. A protocol whose
+// token records a market cap of zero or less is left out of the calibration: a zero cap is a dead
+// or unpriced token, not a market price, and sixteen of them would drag every ratio down. A
+// pre-token protocol's implied value is its TVL at that category ratio, moved by three things the
+// snapshot also records: seven-day TVL growth, how long it has run with no token, and how many
+// chains it runs on. No protocol name is ever special-cased: one function scores all.
 //
-//   ratio(cat)  = shrunk median of mcap_usd / tvl_usd over trading comps in cat
+//   ratio(cat)  = shrunk median of mcap_usd / tvl_usd over trading comps in cat (mcap > 0 only)
 //   growth      = clamp(change_7d, -50, 100); growthMult = 1 + growth * 0.004
 //   maturity    = 0.7 + 0.3 * min(age_days, 1095) / 1095
 //   breadth     = min(1.15, 1 + 0.04 * ln(chains))
 //   implied     = round(tvl_usd * ratio * growthMult * maturity * breadth), at least $1
+//
+// The calibration is tested, not just asserted. A leave-one-out backtest scores the base
+// multiple against every trading comparable: each comp's market cap is predicted from its TVL
+// using the ratios fitted on the other comps, and the error is the absolute log distance. The
+// dashboard reports the median error, the mean error, and the share of comps predicted within
+// two and three times their true cap, per category where there are enough comps to say so. The
+// backtest scores the base multiple only: a trading token's cap already reflects its growth,
+// age and breadth, so the multipliers are adjustments on top of the calibration, not part of
+// it. A model that cannot say how wrong it is cannot be trusted; this one says so, in numbers.
 //
 // Farm plans are built from the same record: category picks the action, TVL picks the
 // capital, age picks the hold, chains pick where the steps happen. Nothing is hand-written
@@ -81,7 +92,7 @@ export const CONSTANTS: RadarConstants = {
   chain_max: 1.15,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** One category's calibration line: what the trading market pays per TVL dollar. */
 export interface CalibLine {
@@ -89,6 +100,22 @@ export interface CalibLine {
   comps: number;
   median_ratio: number;
   ratio_used: number;
+  /** Median absolute log error of the leave-one-out backtest in this category, null when too few comps. */
+  loo_median_log_err: number | null;
+}
+
+/** The leave-one-out backtest of the base multiple, over the trading comparables. */
+export interface Backtest {
+  comps: number;
+  /** Median absolute log distance between predicted and true market cap. */
+  median_log_err: number;
+  mean_log_err: number;
+  /** Share of comps predicted within 2x of their true market cap. */
+  within_2x: number;
+  /** Share of comps predicted within 3x of their true market cap. */
+  within_3x: number;
+  /** Comparables left out of the calibration because their recorded cap is zero or less. */
+  dead_comps_excluded: number;
 }
 
 /** The calibration as a whole: global median plus one line per category with comps. */
@@ -96,6 +123,7 @@ export interface Calibration {
   global_median: number;
   comps_total: number;
   lines: CalibLine[];
+  backtest: Backtest;
 }
 
 /** The arithmetic behind one row's implied value, for the detail view. */
@@ -111,6 +139,10 @@ export interface ValueParts {
   maturity_mult: number;
   chains: number;
   chain_mult: number;
+  /** Median absolute log error of the backtest in this row's category, null when too few comps. */
+  category_loo_median_log_err: number | null;
+  /** How much to trust this row's estimate: High (5+ comps and category error under 1.5), Medium (2-4 comps), Low (0-1 comps). */
+  confidence: 'High' | 'Medium' | 'Low';
 }
 
 /** One row of board.json. */
@@ -178,6 +210,9 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   calibration: Calibration;
+  backtest: Backtest;
+  /** Total implied value per category, strongest first, for the category chart. */
+  by_category: { category: string; rows: number; implied_total_usd: number }[];
   rows: DataRow[];
   live: LiveRef[];
   excluded: ExcludedRef[];
@@ -261,12 +296,15 @@ export function exclusionReasons(p: SnapProtocol): string[] {
 
 /**
  * The calibration: one median mcap/TVL ratio per category over the trading protocols that
- * carry a market cap, shrunk toward the global median so a category with one or two comps
- * cannot set the price on its own, then clamped to a sane band. Categories with no comps
- * fall back to the global median.
+ * carry a positive market cap, shrunk toward the global median so a category with one or two
+ * comps cannot set the price on its own, then clamped to a sane band. Categories with no comps
+ * fall back to the global median. A protocol whose recorded cap is zero or less is left out:
+ * a zero cap is a dead or unpriced token, not a market price, and sixteen of them would drag
+ * every ratio down. The backtest scores the base multiple leave-one-out over the same comps.
  */
 export function calibrate(protocols: SnapProtocol[], c: RadarConstants = CONSTANTS): Calibration {
-  const comps = protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.tvl_usd > 0);
+  const comps = protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  const dead = protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd <= 0 && p.tvl_usd > 0).length;
   const global = median(comps.map((p) => p.mcap_usd! / p.tvl_usd));
   const byCat = new Map<string, number[]>();
   for (const p of comps) {
@@ -280,10 +318,60 @@ export function calibrate(protocols: SnapProtocol[], c: RadarConstants = CONSTAN
       const med = median(ratios);
       const shrunk = (ratios.length * med + c.shrink_k * global) / (ratios.length + c.shrink_k);
       const used = Math.min(c.ratio_max, Math.max(c.ratio_min, shrunk));
-      return { category, comps: ratios.length, median_ratio: round4(med), ratio_used: round4(used) };
+      return { category, comps: ratios.length, median_ratio: round4(med), ratio_used: round4(used), loo_median_log_err: null };
     })
     .sort((a, b) => b.comps - a.comps || (a.category < b.category ? -1 : 1));
-  return { global_median: round4(global), comps_total: comps.length, lines };
+  const backtest = backtestBase(comps, global, c);
+  for (const line of lines) {
+    const catErrs = backtest.per_category.get(line.category);
+    line.loo_median_log_err = catErrs !== undefined && catErrs.length >= 5 ? round4(median(catErrs)) : null;
+  }
+  return { global_median: round4(global), comps_total: comps.length, lines, backtest: backtest.summary(dead) };
+}
+
+/**
+ * Leave-one-out backtest of the base multiple. Each trading comparable's market cap is
+ * predicted from its TVL using the ratios fitted on the other comps in its category (shrunk
+ * toward the global median exactly as the board does), and the error is the absolute log
+ * distance between the prediction and the true cap. Returns the summary plus the per-category
+ * error lists the calibration lines report. The base multiple only: a trading token's cap
+ * already reflects its growth, age and breadth, so the multipliers are not part of it.
+ */
+export function backtestBase(
+  comps: SnapProtocol[],
+  global: number,
+  c: RadarConstants = CONSTANTS,
+): { summary: (dead: number) => Backtest; per_category: Map<string, number[]> } {
+  const byCat = new Map<string, SnapProtocol[]>();
+  for (const p of comps) {
+    const key = p.category ?? 'Uncategorised';
+    const list = byCat.get(key);
+    if (list) list.push(p);
+    else byCat.set(key, [p]);
+  }
+  const errs: number[] = [];
+  const per_category = new Map<string, number[]>();
+  for (const p of comps) {
+    const key = p.category ?? 'Uncategorised';
+    const others = (byCat.get(key) ?? []).filter((q) => q !== p);
+    const med = others.length > 0 ? median(others.map((q) => q.mcap_usd! / q.tvl_usd)) : global;
+    const ratio = (others.length * med + c.shrink_k * global) / (others.length + c.shrink_k);
+    const pred = p.tvl_usd * Math.min(c.ratio_max, Math.max(c.ratio_min, ratio));
+    const err = Math.abs(Math.log(pred) - Math.log(p.mcap_usd!));
+    errs.push(err);
+    const list = per_category.get(key);
+    if (list) list.push(err);
+    else per_category.set(key, [err]);
+  }
+  const summary = (dead: number): Backtest => ({
+    comps: errs.length,
+    median_log_err: round4(median(errs)),
+    mean_log_err: round4(errs.reduce((a, b) => a + b, 0) / Math.max(1, errs.length)),
+    within_2x: round4(errs.filter((e) => e <= Math.log(2)).length / Math.max(1, errs.length)),
+    within_3x: round4(errs.filter((e) => e <= Math.log(3)).length / Math.max(1, errs.length)),
+    dead_comps_excluded: dead,
+  });
+  return { summary, per_category };
 }
 
 /** The ratio a category's pre-token protocols are scored at. */
@@ -312,6 +400,10 @@ export function valueOf(
   const chainMult = Math.min(c.chain_max, 1 + c.chain_per_log * Math.log(nChains));
   const base = p.tvl_usd * ratio;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult));
+  const line = calib.lines.find((l) => l.category === (p.category ?? 'Uncategorised'));
+  const catLoo = line !== undefined ? line.loo_median_log_err : null;
+  const confidence: 'High' | 'Medium' | 'Low' =
+    comps >= 5 && (catLoo === null || catLoo < 1.5) ? 'High' : comps >= 2 ? 'Medium' : 'Low';
   return {
     implied,
     parts: {
@@ -326,6 +418,8 @@ export function valueOf(
       maturity_mult: round4(maturityMult),
       chains: nChains,
       chain_mult: round4(chainMult),
+      category_loo_median_log_err: catLoo,
+      confidence,
     },
   };
 }
@@ -505,6 +599,16 @@ export function buildRadar(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS)
   const excluded = excludedRefs(snapshot);
   const preCount = snapshot.protocols.filter(isPreToken).length;
   const tradingCount = snapshot.protocols.length - preCount;
+  const byCat = new Map<string, { rows: number; total: number }>();
+  for (const r of board) {
+    const key = r.category ?? 'Uncategorised';
+    const cur = byCat.get(key);
+    if (cur) { cur.rows += 1; cur.total += r.implied_value_usd; }
+    else byCat.set(key, { rows: 1, total: r.implied_value_usd });
+  }
+  const by_category = [...byCat.entries()]
+    .map(([category, v]) => ({ category, rows: v.rows, implied_total_usd: v.total }))
+    .sort((a, b) => b.implied_total_usd - a.implied_total_usd);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -521,6 +625,8 @@ export function buildRadar(snapshot: SnapshotDoc, c: RadarConstants = CONSTANTS)
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     calibration: calib,
+    backtest: calib.backtest,
+    by_category,
     rows: board.map((r) => ({
       rank: r.rank,
       slug: r.slug,

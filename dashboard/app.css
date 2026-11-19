@@ -88,6 +88,16 @@ tbody tr[data-selected="true"] { background: rgba(37, 99, 235, .08); }
 .model-cell span { display: block; font-size: 12px; color: var(--muted); }
 .model-cell b { font-size: 15px; }
 .calib td.num, .calib th.num { text-align: right; }
+.chart { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+.chart-row { display: grid; grid-template-columns: 190px 1fr 170px; gap: 12px; align-items: center; }
+.chart-label { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart-bar { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+.chart-bar i { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.chart-row .num { text-align: right; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.backtest { border-left: 4px solid var(--accent); }
+.backtest .facts { margin-top: 12px; }
+.method { background: var(--panel2); }
+.method p { max-width: 90ch; }
 .empty { text-align: center; padding: 30px 10px; }
 .empty h2 { margin: 0 0 6px; }
 .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 650; }

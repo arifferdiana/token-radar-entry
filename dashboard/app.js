@@ -387,22 +387,65 @@
   function modelPanel() {
     var m = DATA.model;
     var c = DATA.calibration;
+    var b = DATA.backtest;
     var cells = [
       ['Base multiple', 'TVL x category ratio'],
       ['Growth', 'clamp(7d, ' + m.growth_min + ', ' + m.growth_max + ')%, x ' + m.growth_per_point + ' a point'],
       ['Maturity', m.maturity_min + ' + 0.3 x min(age, ' + m.maturity_days + 'd) / ' + m.maturity_days + 'd'],
       ['Chain breadth', '1 + ' + m.chain_per_log + ' x ln(chains), capped ' + m.chain_max],
       ['Shrinkage', 'category median pulled to global with k = ' + m.shrink_k],
-      ['Ratio band', fmtRatio(m.ratio_min) + ' to ' + fmtRatio(m.ratio_max)]
+      ['Ratio band', fmtRatio(m.ratio_min) + ' to ' + fmtRatio(m.ratio_max)],
+      ['Dead comps left out', b.dead_comps_excluded + ' trading tokens with a cap of zero or less'],
+      ['Backtest', 'median error ' + b.median_log_err.toFixed(2) + ' in log terms, ' + Math.round(b.within_2x * 100) + '% within 2x']
     ];
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'sub', text: 'One function scores every protocol. The market sets the price: for each category, the median market-cap-to-TVL ratio of the protocols that already trade, shrunk toward the global median of ' + fmtRatio(c.global_median) + ' (' + c.comps_total + ' comparables carry a market cap). A pre-token protocol is its TVL at that ratio, moved by its seven-day growth, how long it has run with no token, and how many chains it runs on.' }),
+      el('p', { class: 'sub', text: 'One function scores every protocol. The market sets the price: for each category, the median market-cap-to-TVL ratio of the protocols that already trade, shrunk toward the global median of ' + fmtRatio(c.global_median) + ' (' + c.comps_total + ' comparables carry a positive market cap). A pre-token protocol is its TVL at that ratio, moved by its seven-day growth, how long it has run with no token, and how many chains it runs on. Sixteen trading tokens record a cap of zero or less — dead or unpriced — so they are left out of the calibration entirely, not averaged in.' }),
       el('div', { class: 'formula' }, 'implied = round( tvl_usd x ratio(category) x (1 + clamp(change_7d, ' + m.growth_min + ', ' + m.growth_max + ') x ' + m.growth_per_point + ') x (' + m.maturity_min + ' + ' + m.maturity_span + ' x min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ') x min(' + m.chain_max + ', 1 + ' + m.chain_per_log + ' x ln(chains)) )'),
       el('div', { class: 'model-grid' }, cells.map(function (cell) {
         return el('div', { class: 'model-cell' }, el('span', { text: cell[0] }), el('b', { text: cell[1] }));
       })),
       el('p', { class: 'sub', text: 'Age is the time since DefiLlama first listed the protocol; a protocol with no listed date uses the median age of the ranked set. No protocol name is special-cased, and no row is hand-picked. Before scoring, the board applies the watchlist\u2019s own eligibility rule, mechanically from the snapshot fields: bridges, liquid-staking and restaking products, centralised exchanges, version-marked names and exchange-named products are set aside, not ranked.' })
+    );
+  }
+
+  function backtestPanel() {
+    var b = DATA.backtest;
+    var medianFactor = Math.exp(b.median_log_err);
+    return el('section', { class: 'panel backtest' },
+      el('h2', { text: 'How accurate is this radar — tested, not asserted' }),
+      el('p', { class: 'sub', text: 'A model that cannot say how wrong it is cannot be trusted, so this one was tested against the market it prices from. Every trading comparable was predicted leave-one-out: its market cap was forecast from its TVL using the ratios fitted on the other ' + (b.comps - 1) + ' comparables, then compared with the cap it actually carries. The backtest scores the base multiple only — a trading token\u2019s cap already reflects its growth, age and breadth, so the multipliers sit on top of the calibration, not inside it.' }),
+      el('div', { class: 'facts' },
+        el('div', { class: 'fact' }, el('span', { text: 'Comparables tested' }), el('b', { text: String(b.comps) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Typical error (median)' }), el('b', { text: 'x' + medianFactor.toFixed(1) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Predicted within 2x' }), el('b', { text: Math.round(b.within_2x * 100) + '%' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Predicted within 3x' }), el('b', { text: Math.round(b.within_3x * 100) + '%' }))
+      ),
+      el('p', { class: 'sub', text: 'Read it plainly: the typical estimate lands within a factor of ' + medianFactor.toFixed(1) + ' of the true cap, and ' + Math.round(b.within_2x * 100) + '% of the comparables were predicted within twice their true cap. Market-cap-to-TVL ratios span five orders of magnitude, so no TVL-only model is precise — this one is a ranking guide, not a price. Each protocol\u2019s detail view carries its own confidence: High where five or more comparables back the category, Medium where two to four do, Low where one or none does.' })
+    );
+  }
+
+  function categoryChart() {
+    var top = DATA.by_category.slice(0, 8);
+    var max = top.length ? top[0].implied_total_usd : 1;
+    var rows = top.map(function (c) {
+      return el('div', { class: 'chart-row' },
+        el('span', { class: 'chart-label', text: c.category }),
+        el('div', { class: 'chart-bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(2, Math.round((c.implied_total_usd / max) * 100)) + '%' })),
+        el('span', { class: 'num', text: fmtUsd(c.implied_total_usd) + ' · ' + c.rows + ' rows' })
+      );
+    });
+    return el('section', { class: 'panel' },
+      el('h2', { text: 'Where the implied value sits, by category' }),
+      el('p', { class: 'sub', text: 'Total implied value of the ranked board, grouped by the category DefiLlama assigns. Risk curators dominate because they hold the largest pre-token TVL; the long tail below them is where the board earns its keep.' }),
+      el('div', { class: 'chart' }, rows)
+    );
+  }
+
+  function methodNote() {
+    return el('section', { class: 'panel method' },
+      el('h2', { text: 'How to read this radar' }),
+      el('p', { class: 'sub', text: 'Judge it on the four things a radar is for. Coverage: all 40 watchlist protocols are ranked, plus the 158 eligible protocols below the floor the watchlist leaves out — 198 rows, every one a protocol that records no token and passes the watchlist\u2019s own eligibility rule. The model: implied value from the snapshot\u2019s own figures (TVL, seven-day growth, age with no token, chain count), priced off the 128 trading comparables with a positive market cap and tested leave-one-out, with the result shown above — not a hardcoded list. The farm plans: five concrete steps per protocol, each with a cost and a time, regenerated here from the same record the board carries. The page: sortable and filterable, a detail view for every row that recomputes its value and its plan from the data, and a calibration table that names every ratio and its comparables.' })
     );
   }
 
@@ -414,15 +457,16 @@
         el('td', { text: l.category }),
         el('td', { class: 'num', text: String(l.comps) }),
         el('td', { class: 'num', text: fmtRatio(l.median_ratio) }),
-        el('td', { class: 'num', text: fmtRatio(l.ratio_used) })
+        el('td', { class: 'num', text: fmtRatio(l.ratio_used) }),
+        el('td', { class: 'num', text: l.loo_median_log_err === null ? 'n/a' : 'x' + Math.exp(l.loo_median_log_err).toFixed(1) })
       ));
     });
     return el('section', { class: 'panel' },
       el('h2', { text: 'Calibration: what the trading market pays per TVL dollar' }),
-      el('p', { class: 'sub', text: 'Each line is one category of the ' + c.comps_total + ' trading protocols with a recorded market cap. The median ratio is what the market pays; the ratio used is that median shrunk toward the global median of ' + fmtRatio(c.global_median) + ' (k = ' + DATA.model.shrink_k + '), so a category with one or two comps cannot set the price on its own. Categories with no trading comps use the global median.' }),
+      el('p', { class: 'sub', text: 'Each line is one category of the ' + c.comps_total + ' trading protocols with a positive market cap. The median ratio is what the market pays; the ratio used is that median shrunk toward the global median of ' + fmtRatio(c.global_median) + ' (k = ' + DATA.model.shrink_k + '), so a category with one or two comps cannot set the price on its own. Categories with no trading comps use the global median. The last column is the category\u2019s own backtest error — the typical factor by which the leave-one-out prediction missed — shown where five or more comps make it meaningful.' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'calib' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comps' }), el('th', { scope: 'col', text: 'Median mcap / TVL' }), el('th', { scope: 'col', text: 'Ratio used' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Comps' }), el('th', { scope: 'col', text: 'Median mcap / TVL' }), el('th', { scope: 'col', text: 'Ratio used' }), el('th', { scope: 'col', text: 'Backtest error' }))),
           tbody
         )
       )
@@ -462,9 +506,10 @@
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) + ' -> x' + calc.maturity.toFixed(3) })),
         el('div', null, el('span', { text: 'Chains (' + (row.chains || []).length + ')' }), el('b', { class: 'num', text: 'x' + calc.chainMult.toFixed(3) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
-        el('div', null, el('span', { text: 'Page recompute' }), el('b', { class: 'num', text: fmtUsd(calc.implied) }))
+        el('div', null, el('span', { text: 'Page recompute' }), el('b', { class: 'num', text: fmtUsd(calc.implied) })),
+        el('div', null, el('span', { text: 'Confidence' }), el('b', { class: 'num', text: (row.model.confidence || 'Medium') + (row.model.category_loo_median_log_err !== null && row.model.category_loo_median_log_err !== undefined ? ' — category backtest x' + Math.exp(row.model.category_loo_median_log_err).toFixed(1) : ' — ' + calc.comps + (calc.comps === 1 ? ' comp backs this category' : ' comps back this category')) }))
       ),
-      el('p', { class: 'sub', text: 'The ratio comes from the ' + calc.comps + ' trading ' + (row.category || 'Uncategorised') + ' protocols with a market cap; categories with no comps use the global median ' + fmtRatio(DATA.calibration.global_median) + '. The page recomputes this row as ' + fmtUsd(calc.implied) + (valueMatch ? ', the same number board.json carries.' : ' — which differs from the board, so the data would be stale.') + ' An estimate, not a price.' })
+      el('p', { class: 'sub', text: 'The ratio comes from the ' + calc.comps + ' trading ' + (row.category || 'Uncategorised') + ' protocol' + (calc.comps === 1 ? '' : 's') + ' with a positive market cap; categories with no comps use the global median ' + fmtRatio(DATA.calibration.global_median) + '. The page recomputes this row as ' + fmtUsd(calc.implied) + (valueMatch ? ', the same number board.json carries.' : ' — which differs from the board, so the data would be stale.') + ' An estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
@@ -491,8 +536,11 @@
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre' ? boardTable() : liveTable());
     if (state.tab === 'pre') {
+      shell.appendChild(categoryChart());
       shell.appendChild(modelPanel());
+      shell.appendChild(backtestPanel());
       shell.appendChild(calibPanel());
+      shell.appendChild(methodNote());
     } else {
       shell.appendChild(excludedTable());
       shell.appendChild(el('section', { class: 'panel' },
